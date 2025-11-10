@@ -18,14 +18,30 @@ typedef struct {
 	char **files;
 	int nfiles;
 	int next_index;
+	int next_write_index;
 	pthread_mutex_t index_lock;
-	unsigned char **compressed_data;
-	int *compressed_sizes;
-	int *original_sizes;
+	pthread_mutex_t write_lock;
+	pthread_cond_t write_cond;
+	FILE *f_out;
+	long long total_in;
+	long long total_out;
 } compression_context_t;
 
+typedef struct {
+	compression_context_t *ctx;
+	z_stream stream;
+	unsigned char *buffer_in;
+	unsigned char *buffer_out;
+} worker_state_t;
+
 static void *compression_worker(void *arg) {
-	compression_context_t *ctx = (compression_context_t *) arg;
+	worker_state_t *worker = (worker_state_t *) arg;
+	compression_context_t *ctx = worker->ctx;
+	z_stream *strm = &worker->stream;
+
+	memset(strm, 0, sizeof(z_stream));
+	int ret = deflateInit(strm, Z_BEST_COMPRESSION);
+	assert(ret == Z_OK);
 
 	while(1) {
 		pthread_mutex_lock(&ctx->index_lock);
@@ -35,46 +51,45 @@ static void *compression_worker(void *arg) {
 		if(idx >= ctx->nfiles)
 			break;
 
-		int len = strlen(ctx->directory_name)+strlen(ctx->files[idx])+2;
-		char *full_path = malloc(len*sizeof(char));
+		size_t len = strlen(ctx->directory_name) + strlen(ctx->files[idx]) + 2;
+		char *full_path = malloc((len+1) * sizeof(char));
 		assert(full_path != NULL);
 		strcpy(full_path, ctx->directory_name);
 		strcat(full_path, "/");
 		strcat(full_path, ctx->files[idx]);
 
-		unsigned char buffer_in[BUFFER_SIZE];
-		unsigned char buffer_out[BUFFER_SIZE];
-
 		FILE *f_in = fopen(full_path, "rb");
 		assert(f_in != NULL);
-		int nbytes = fread(buffer_in, sizeof(unsigned char), BUFFER_SIZE, f_in);
+			int nbytes = fread(worker->buffer_in, sizeof(unsigned char), BUFFER_SIZE, f_in);
 		fclose(f_in);
-		ctx->original_sizes[idx] = nbytes;
+		free(full_path);
 
-		z_stream strm;
-		memset(&strm, 0, sizeof(z_stream));
-		int ret = deflateInit(&strm, 9);
+		ret = deflateReset(strm);
 		assert(ret == Z_OK);
-		strm.avail_in = nbytes;
-		strm.next_in = buffer_in;
-		strm.avail_out = BUFFER_SIZE;
-		strm.next_out = buffer_out;
+		strm->avail_in = nbytes;
+		strm->next_in = worker->buffer_in;
+		strm->avail_out = BUFFER_SIZE;
+		strm->next_out = worker->buffer_out;
 
-		ret = deflate(&strm, Z_FINISH);
+		ret = deflate(strm, Z_FINISH);
 		assert(ret == Z_STREAM_END);
 
-		int nbytes_zipped = BUFFER_SIZE-strm.avail_out;
-		ctx->compressed_data[idx] = malloc(nbytes_zipped*sizeof(unsigned char));
-		assert(ctx->compressed_data[idx] != NULL);
-		memcpy(ctx->compressed_data[idx], buffer_out, nbytes_zipped*sizeof(unsigned char));
-		ctx->compressed_sizes[idx] = nbytes_zipped;
+		int nbytes_zipped = BUFFER_SIZE - strm->avail_out;
 
-		ret = deflateEnd(&strm);
-		assert(ret == Z_OK);
+		pthread_mutex_lock(&ctx->write_lock);
+		while(idx != ctx->next_write_index)
+			pthread_cond_wait(&ctx->write_cond, &ctx->write_lock);
 
-		free(full_path);
+		fwrite(&nbytes_zipped, sizeof(int), 1, ctx->f_out);
+		fwrite(worker->buffer_out, sizeof(unsigned char), nbytes_zipped, ctx->f_out);
+		ctx->total_in += nbytes;
+		ctx->total_out += nbytes_zipped;
+		ctx->next_write_index++;
+		pthread_cond_broadcast(&ctx->write_cond);
+		pthread_mutex_unlock(&ctx->write_lock);
 	}
 
+	deflateEnd(strm);
 	return NULL;
 }
 
@@ -106,67 +121,63 @@ int compress_directory(char *directory_name) {
 	closedir(d);
 	qsort(files, nfiles, sizeof(char *), cmp);
 
-	unsigned char **compressed_data = NULL;
-	int *compressed_sizes = NULL;
-	int *original_sizes = NULL;
-	if(nfiles > 0) {
-		compressed_data = calloc(nfiles, sizeof(unsigned char *));
-		compressed_sizes = calloc(nfiles, sizeof(int));
-		original_sizes = calloc(nfiles, sizeof(int));
-		assert(compressed_data != NULL && compressed_sizes != NULL && original_sizes != NULL);
-
-		compression_context_t ctx;
-		ctx.directory_name = directory_name;
-		ctx.files = files;
-		ctx.nfiles = nfiles;
-		ctx.next_index = 0;
-		ctx.compressed_data = compressed_data;
-		ctx.compressed_sizes = compressed_sizes;
-		ctx.original_sizes = original_sizes;
-		pthread_mutex_init(&ctx.index_lock, NULL);
-
-		int worker_count = nfiles < MAX_WORKER_THREADS ? nfiles : MAX_WORKER_THREADS;
-		if(worker_count == 0)
-			worker_count = 1;
-
-		pthread_t threads[MAX_WORKER_THREADS];
-		for(int i=0; i<worker_count; i++) {
-			int ret = pthread_create(&threads[i], NULL, compression_worker, &ctx);
-			assert(ret == 0);
-		}
-		for(int i=0; i<worker_count; i++) {
-			int ret = pthread_join(threads[i], NULL);
-			assert(ret == 0);
-		}
-		pthread_mutex_destroy(&ctx.index_lock);
-	}
-
-	// create a single zipped package with all text files in lexicographical order
-	int total_in = 0, total_out = 0;
 	FILE *f_out = fopen("text.tzip", "wb");
 	assert(f_out != NULL);
-	for(int i=0; i < nfiles; i++) {
-		fwrite(&compressed_sizes[i], sizeof(int), 1, f_out);
-		fwrite(compressed_data[i], sizeof(unsigned char), compressed_sizes[i], f_out);
-		total_in += original_sizes[i];
-		total_out += compressed_sizes[i];
-		free(compressed_data[i]);
-	}
+	setvbuf(f_out, NULL, _IOFBF, BUFFER_SIZE);
+
+	compression_context_t ctx;
+	ctx.directory_name = directory_name;
+	ctx.files = files;
+	ctx.nfiles = nfiles;
+	ctx.next_index = 0;
+	ctx.next_write_index = 0;
+	ctx.f_out = f_out;
+	ctx.total_in = 0;
+	ctx.total_out = 0;
+	pthread_mutex_init(&ctx.index_lock, NULL);
+	pthread_mutex_init(&ctx.write_lock, NULL);
+	pthread_cond_init(&ctx.write_cond, NULL);
+
+	if(nfiles > 0) {
+			int worker_count = nfiles < MAX_WORKER_THREADS ? nfiles : MAX_WORKER_THREADS;
+			if(worker_count == 0)
+				worker_count = 1;
+
+			pthread_t threads[MAX_WORKER_THREADS];
+			worker_state_t *worker_states = calloc(worker_count, sizeof(worker_state_t));
+			assert(worker_states != NULL);
+
+			for(int i=0; i<worker_count; i++) {
+				worker_states[i].ctx = &ctx;
+				worker_states[i].buffer_in = malloc(BUFFER_SIZE);
+				worker_states[i].buffer_out = malloc(BUFFER_SIZE);
+				assert(worker_states[i].buffer_in != NULL && worker_states[i].buffer_out != NULL);
+				int ret = pthread_create(&threads[i], NULL, compression_worker, &worker_states[i]);
+				assert(ret == 0);
+			}
+			for(int i=0; i<worker_count; i++) {
+				int ret = pthread_join(threads[i], NULL);
+				assert(ret == 0);
+				free(worker_states[i].buffer_in);
+				free(worker_states[i].buffer_out);
+			}
+			free(worker_states);
+		}
+
+	pthread_mutex_destroy(&ctx.index_lock);
+	pthread_mutex_destroy(&ctx.write_lock);
+	pthread_cond_destroy(&ctx.write_cond);
 	fclose(f_out);
 
-	if(nfiles == 0 || total_in == 0)
+	if(ctx.total_in == 0)
 		printf("Compression rate: 0.00%%\n");
 	else
-		printf("Compression rate: %.2lf%%\n", 100.0*(total_in-total_out)/total_in);
+		printf("Compression rate: %.2lf%%\n", 100.0*(ctx.total_in-ctx.total_out)/ctx.total_in);
 
 	// release list of files
 	for(int i=0; i < nfiles; i++)
 		free(files[i]);
 	free(files);
-	free(compressed_data);
-	free(compressed_sizes);
-	free(original_sizes);
-
 	// do not modify the main function after this point!
 	return 0;
 }
