@@ -1,3 +1,5 @@
+// Tevin Gajadhar #U89310811
+
 #define SERIAL_IMPLEMENTATION
 
 #include "serial.h"
@@ -23,7 +25,7 @@ int list_txt_files(const char *dir, char ***out_files, int *out_n) {
 	if(out_n != NULL)
 		*out_n = 0;
 
-	fprintf(stderr, "list_txt_files is a placeholder – implement me!\n");
+	fprintf(stderr, "list_txt_files is a placeholder - implement me!\n");
 	return 0;
 }
 
@@ -52,6 +54,7 @@ void destroy_context(compression_context_t *ctx) {
 	ctx->f_out = NULL;
 }
 
+// Tevin Gajadhar #U89310811
 void *compression_worker(void *arg) {
 	(void)arg;
 	fprintf(stderr, "compression_worker is a placeholder – implement me!\n");
