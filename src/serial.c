@@ -18,14 +18,61 @@ static int cmp(const void *a, const void *b) {
 }
 
 int list_txt_files(const char *dir, char ***out_files, int *out_n) {
-	(void)dir;
-
+	// ensure arguments are properly initialized
 	if(out_files != NULL)
 		*out_files = NULL;
 	if(out_n != NULL)
 		*out_n = 0;
+	
+	// open directory to read file names
+	DIR* d = opendir(dir);
+	if (d == NULL) {
+		fprintf(stderr, "Invalid directory.\n");
+		return -1;
+	}
+		
+	// local variables to construct file name array
+	char **files = NULL;
+	int n_files = 0;
+	int capacity = 0; // total space of the allocated memory at *files (reduces realloc() calls)
+	
+	struct dirent* dir;
+	while((dir = readdir(d)) != NULL) {
+		const char* name = dir->d_name;
 
-	fprintf(stderr, "list_txt_files is a placeholder - implement me!\n");
+		// skip hidden files ".", ".."
+		if (strcmp(name, ".") == 0 || strmp(name, "..") == 0) {
+			continue;
+		}
+
+		// ensure files include .txt extension
+		int name_len = strlen(dir->d_name);
+		if (name_len >= 4 && name[name_len-4] == '.' && name[name_len-3] == 't' && name[name_len-2] == 'x' && name[name_len-1] == 't') {
+			// file name includes .txt extension, expand array if necessary and copy name
+			if (n_files == capacity) { // need to allocate more room
+				capacity = (capacity == 0) ? 16 : capacity * 2;
+				char **temp = realloc(files, capacity * sizeof(char*));
+				assert(temp != NULL);
+				files = temp;
+			}
+			// append filename to files array
+			files[n_files] = strdup(name);
+			assert(files[n_files] != NULL);
+			++n_files;
+		}
+	}
+	
+	// sort out_files alphabetically
+	if (n_files > 1) {
+		qsort(files, n_files, sizeof(char*), cmp);
+	}
+
+	// prepare outputs
+	outfiles = calloc(n_files, sizeof(char*));
+	outfiles = &files;
+	out_n = malloc(sizeof(int));
+	out_n = &n_files
+	
 	return 0;
 }
 
