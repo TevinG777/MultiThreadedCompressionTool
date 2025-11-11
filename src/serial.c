@@ -71,7 +71,7 @@ int list_txt_files(const char *dir, char ***out_files, int *out_n) {
 	outfiles = calloc(n_files, sizeof(char*));
 	outfiles = &files;
 	out_n = malloc(sizeof(int));
-	out_n = &n_files
+	out_n = &n_files;
 	
 	return 0;
 }
