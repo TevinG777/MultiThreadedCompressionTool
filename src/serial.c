@@ -61,11 +61,63 @@ void *compression_worker(void *arg) {
 	return NULL;
 }
 
-int spawn_workers(compression_context_t *ctx, int worker_count) {
-	(void)ctx;
-	(void)worker_count;
-	fprintf(stderr, "spawn_workers is a placeholder – implement me!\n");
-	return -1;
+//Jack Rodriguez U69523108
+int spawn_workers(compression_context_t *ctx, int worker_count) 
+{
+	//If there are no files do nothing
+	if (!ctx || ctx->file_count <= 0)
+	{
+		return 0;
+	} 
+
+	//if there is no current workers
+    if (worker_count <= 0)
+	{
+		//set the number of workers to the number of files.
+		worker_count = ctx->file_count;
+	} 
+	//if there are more workers than files
+    if (worker_count > ctx->file_count)
+	{
+		//set worker count to the file count
+		worker_count = ctx->file_count;
+	} 
+	//if there are more workers than the max allowed, set it to max
+    if (worker_count > MAX_WORKER_THREADS)
+	{
+		worker_count = MAX_WORKER_THREADS;
+	} 
+
+	//makes 19 threads
+    pthread_t th[MAX_WORKER_THREADS];
+
+	//------failed part way through ---------
+	//loop runs once for each worker count
+    for (int i = 0; i < worker_count; i++) 
+	{
+		//if there is a thread
+        if (pthread_create(&th[i], NULL, compression_worker, ctx) != 0) 
+		{
+			//decrements i and run pthread for each thread so that they join back
+            while (i--)
+			{
+				pthread_join(th[i], NULL);
+			} 
+			//if it returns here we have an error
+            return -1;
+        }
+    }
+//------successful--------
+	//for each worker
+    for (int i = 0; i < worker_count; i++)
+	{
+		//joins
+		pthread_join(th[i], NULL);
+	}
+
+
+	//function done
+    return 0;
 }
 
 int compress_directory(char *directory_name) {
