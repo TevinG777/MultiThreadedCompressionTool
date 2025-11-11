@@ -36,17 +36,17 @@ int list_txt_files(const char *dir, char ***out_files, int *out_n) {
 	int n_files = 0;
 	int capacity = 0; // total space of the allocated memory at *files (reduces realloc() calls)
 	
-	struct dirent* dir;
-	while((dir = readdir(d)) != NULL) {
-		const char* name = dir->d_name;
+	struct dirent* entry;
+	while((entry = readdir(d)) != NULL) {
+		const char* name = entry->d_name;
 
 		// skip hidden files ".", ".."
-		if (strcmp(name, ".") == 0 || strmp(name, "..") == 0) {
+		if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
 			continue;
 		}
 
 		// ensure files include .txt extension
-		int name_len = strlen(dir->d_name);
+		int name_len = strlen(entry->d_name);
 		if (name_len >= 4 && name[name_len-4] == '.' && name[name_len-3] == 't' && name[name_len-2] == 'x' && name[name_len-1] == 't') {
 			// file name includes .txt extension, expand array if necessary and copy name
 			if (n_files == capacity) { // need to allocate more room
@@ -67,12 +67,21 @@ int list_txt_files(const char *dir, char ***out_files, int *out_n) {
 		qsort(files, n_files, sizeof(char*), cmp);
 	}
 
+	closedir(d);
+
 	// prepare outputs
-	outfiles = calloc(n_files, sizeof(char*));
-	outfiles = &files;
-	out_n = malloc(sizeof(int));
-	out_n = &n_files;
-	
+	if(out_files != NULL)
+		*out_files = files;
+	else {
+		for(int i = 0; i < n_files; ++i)
+			free(files[i]);
+		free(files);
+		files = NULL;
+	}
+
+	if(out_n != NULL)
+		*out_n = n_files;
+		
 	return 0;
 }
 
