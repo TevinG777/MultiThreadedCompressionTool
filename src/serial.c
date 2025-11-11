@@ -31,7 +31,7 @@ int list_txt_files(const char *dir, char ***out_files, int *out_n) {
 
 void init_context(compression_context_t *ctx, const char *dir, char **files, int n, FILE *f_out) {
 	assert(ctx != NULL);
-	ctx->directory = dir;
+	ctx->directory_name = dir;
 	ctx->files = files;
 	ctx->file_count = n;
 	ctx->next_index = 0;
@@ -56,8 +56,152 @@ void destroy_context(compression_context_t *ctx) {
 
 // Tevin Gajadhar #U89310811
 void *compression_worker(void *arg) {
-	(void)arg;
-	fprintf(stderr, "compression_worker is a placeholder – implement me!\n");
+
+	// cast arg to worker_state_t pointer to access context so that we can access the global context
+	worker_state_t *w = (worker_state_t *)arg;
+    compression_context_t *ctx = w->ctx;
+
+	// initialize zlib stream and set up for compression
+	z_stream *s = &w->stream;
+    memset(s, 0, sizeof(*s));
+    if (deflateInit(s, Z_BEST_COMPRESSION) != Z_OK) return NULL;
+
+	// allocate input and output buffers
+	if (!w->buffer_in)  w->buffer_in  = (unsigned char*)malloc(BUFFER_SIZE);
+    if (!w->buffer_out) w->buffer_out = (unsigned char*)malloc(BUFFER_SIZE);
+
+	// If either buffer allocation failed, clean up and exit
+    if (!w->buffer_in || !w->buffer_out) { deflateEnd(s); return NULL; }
+
+	// Variable to detect if we need to abort a file
+	int abort_file = 0;
+
+	while (1) {
+		// Claim the next file to process and increment the index 
+		pthread_mutex_lock(&ctx->index_lock);
+
+		// Get the next file index to process and dtermine if there are more files to process
+		int i = ctx->next_index++;
+		int done = (i >= ctx->file_count);
+		pthread_mutex_unlock(&ctx->index_lock);
+
+		// Break if all files have been processed
+		if (done) break;
+
+		// reset abort_file flag for the new file
+		abort_file = 0;
+        char path[4096];
+
+		// Create the full file path using the directory name and file name
+        snprintf(path, sizeof(path), "%s/%s", ctx->directory_name ? ctx->directory_name : ".", ctx->files[i]);
+
+		// Open the file for reading in binary mode, if fail continue to next file
+        FILE *fin = fopen(path, "rb");
+        if (!fin) continue;
+
+		// Create a tmp file to store the compressed data if fail close input file and continue
+        FILE *ftmp = tmpfile();                
+        if (!ftmp) { fclose(fin); continue; }
+
+		// Reset zlib stream for new compression and intialize byte counters
+        deflateReset(s);
+        unsigned long long in_bytes = 0, out_bytes = 0;
+
+		// Loop to read from input file, compress it and write to the temp file
+		while(1) {
+			// Read a chunk of data from the input file of size BUFFER_SIZE
+            size_t rd = fread(w->buffer_in, 1, BUFFER_SIZE, fin);
+
+			// If read error occurs, break the loop
+            if (rd == 0 && ferror(fin)) break;
+
+			// Update input byte counter and set zlib input buffer
+            in_bytes += rd;
+            s->next_in = w->buffer_in;
+            s->avail_in = (uInt)rd;
+
+			// Compress the data and write to the temp file
+            int flush = feof(fin) ? Z_FINISH : Z_NO_FLUSH;
+
+			int err = 0;
+
+			// Loop to deflate until all input is consumed and output buffer is flushed
+            do {
+
+				// Set zlib output buffer
+			    s->next_out  = w->buffer_out;	
+			    s->avail_out = (uInt)BUFFER_SIZE;              
+
+				// Perform deflation
+			    int ret = deflate(s, flush);
+			    if (ret == Z_STREAM_ERROR) {  
+					err = 1;                
+			        break;
+			    }
+				
+				// Calculate number of bytes produced and write to temp file
+			    size_t have = BUFFER_SIZE - s->avail_out;
+
+				// If there are bytes to write then write them to the temp file
+			    if (have) {
+					// Write compressed data to the temporary file
+			        size_t written = fwrite(w->buffer_out, 1, have, ftmp);
+			        if (written != have) {  
+						err = 1;                   
+			            break;
+			        }
+			        out_bytes += written;
+			    }
+			} while (s->avail_in > 0 || (flush == Z_FINISH && s->avail_out == 0));
+
+            if (err) { abort_file = 1; break; }
+    		if (feof(fin)) break;        
+        }
+
+		// Close input, if abort_file is set continue to next file
+		fclose(fin);
+		if (abort_file) continue; 
+		
+
+		// Grab the write lock to write 
+		pthread_mutex_lock(&ctx->write_lock);
+
+		// Wait until it’s this worker’s turn to write
+		while (i != ctx->next_write_index)
+		    pthread_cond_wait(&ctx->write_cond, &ctx->write_lock);
+
+		// rewind temp file and write its contents to the output file
+		rewind(ftmp);
+
+		// write temp file contents to output file
+		for (;;) {
+		    size_t rd2 = fread(w->buffer_out, 1, BUFFER_SIZE, ftmp);
+		    if (!rd2) break;
+		    fwrite(w->buffer_out, 1, rd2, ctx->f_out);
+		}
+
+		// flush output file to ensure data is written
+		fflush(ctx->f_out);
+
+		// update stats while holding the lock
+		ctx->total_in  += (long long)in_bytes;
+		ctx->total_out += (long long)out_bytes;
+
+		// let next index write
+		ctx->next_write_index++;
+		pthread_cond_broadcast(&ctx->write_cond);
+		pthread_mutex_unlock(&ctx->write_lock);
+
+		// now it’s safe to close the temp file
+		fclose(ftmp);
+
+	}
+
+	// Clean up zlib stream and buffers
+	deflateEnd(s);
+	free(w->buffer_in);
+	free(w->buffer_out);
+	w->buffer_in = w->buffer_out = NULL;
 	return NULL;
 }
 
@@ -120,37 +264,93 @@ int spawn_workers(compression_context_t *ctx, int worker_count)
     return 0;
 }
 
+
+
 int compress_directory(char *directory_name) {
-	if(directory_name == NULL)
-		return -1;
+	DIR *d;
+	struct dirent *dir;
+	char **files = NULL;
+	int nfiles = 0;
 
-	compression_context_t ctx;
-	memset(&ctx, 0, sizeof(ctx));
-
-	if(list_txt_files(directory_name, &ctx.files, &ctx.file_count) != 0) {
-		fprintf(stderr, "list_txt_files failed.\n");
-		return -1;
+	d = opendir(directory_name);
+	if(d == NULL) {
+		printf("An error has occurred\n");
+		return 0;
 	}
+
+	// create sorted list of text files
+	while ((dir = readdir(d)) != NULL) {
+		int len = strlen(dir->d_name);
+		if(len >= 4 && dir->d_name[len-4] == '.' && dir->d_name[len-3] == 't' && dir->d_name[len-2] == 'x' && dir->d_name[len-1] == 't') {
+			files = realloc(files, (nfiles+1)*sizeof(char *));
+			assert(files != NULL);
+
+			files[nfiles] = strdup(dir->d_name);
+			assert(files[nfiles] != NULL);
+
+			nfiles++;
+		}
+	}
+	closedir(d);
+	qsort(files, nfiles, sizeof(char *), cmp);
 
 	FILE *f_out = fopen("text.tzip", "wb");
-	if(f_out == NULL) {
-		perror("text.tzip");
-		destroy_context(&ctx);
-		return -1;
-	}
+	assert(f_out != NULL);
+	setvbuf(f_out, NULL, _IOFBF, BUFFER_SIZE);
 
-	init_context(&ctx, directory_name, ctx.files, ctx.file_count, f_out);
+	compression_context_t ctx;
+	ctx.directory_name = directory_name;
+	ctx.files = files;
+	ctx.file_count = nfiles;
+	ctx.next_index = 0;
+	ctx.next_write_index = 0;
+	ctx.f_out = f_out;
+	ctx.total_in = 0;
+	ctx.total_out = 0;
+	pthread_mutex_init(&ctx.index_lock, NULL);
+	pthread_mutex_init(&ctx.write_lock, NULL);
+	pthread_cond_init(&ctx.write_cond, NULL);
 
-	int worker_status = spawn_workers(&ctx, 0);
+	if(nfiles > 0) {
+			int worker_count = nfiles < MAX_WORKER_THREADS ? nfiles : MAX_WORKER_THREADS;
+			if(worker_count == 0)
+				worker_count = 1;
 
+			pthread_t threads[MAX_WORKER_THREADS];
+			worker_state_t *worker_states = calloc(worker_count, sizeof(worker_state_t));
+			assert(worker_states != NULL);
+
+			for(int i=0; i<worker_count; i++) {
+				worker_states[i].ctx = &ctx;
+				worker_states[i].buffer_in = malloc(BUFFER_SIZE);
+				worker_states[i].buffer_out = malloc(BUFFER_SIZE);
+				assert(worker_states[i].buffer_in != NULL && worker_states[i].buffer_out != NULL);
+				int ret = pthread_create(&threads[i], NULL, compression_worker, &worker_states[i]);
+				assert(ret == 0);
+			}
+			for(int i=0; i<worker_count; i++) {
+				int ret = pthread_join(threads[i], NULL);
+				assert(ret == 0);
+				free(worker_states[i].buffer_in);
+				free(worker_states[i].buffer_out);
+			}
+			free(worker_states);
+		}
+
+	pthread_mutex_destroy(&ctx.index_lock);
+	pthread_mutex_destroy(&ctx.write_lock);
+	pthread_cond_destroy(&ctx.write_cond);
 	fclose(f_out);
-	destroy_context(&ctx);
 
-	if(worker_status != 0) {
-		fprintf(stderr, "spawn_workers failed – the template is unfinished.\n");
-		return worker_status;
-	}
+	if(ctx.total_in == 0)
+		printf("Compression rate: 0.00%%\n");
+	else
+		printf("Compression rate: %.2lf%%\n", 100.0*(ctx.total_in-ctx.total_out)/ctx.total_in);
 
-	printf("Compression rate: 0.00%%\n");
+	// release list of files
+	for(int i=0; i < nfiles; i++)
+		free(files[i]);
+	free(files);
+	// do not modify the main function after this point!
 	return 0;
 }
