@@ -17,6 +17,7 @@ static int cmp(const void *a, const void *b) {
 	return strcmp(*(char *const *) a, *(char *const *) b);
 }
 
+// Ethan Varn U41240412
 int list_txt_files(const char *dir, char ***out_files, int *out_n) {
 	// ensure arguments are properly initialized
 	if(out_files != NULL)
