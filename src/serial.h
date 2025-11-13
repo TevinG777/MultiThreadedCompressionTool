@@ -2,6 +2,8 @@
 #define __SERIAL_H__
 
 #include <stdio.h>
+#include <pthread.h>
+#include <zlib.h>
 #define MAX_WORKER_THREADS 19
 
 typedef struct compression_context {
