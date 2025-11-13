@@ -324,32 +324,15 @@ int spawn_workers(compression_context_t *ctx, int worker_count)
 
 
 int compress_directory(char *directory_name) {
-	DIR *d;
-	struct dirent *dir;
+	// create sorted list of text files
 	char **files = NULL;
 	int nfiles = 0;
 
-	d = opendir(directory_name);
-	if(d == NULL) {
-		printf("An error has occurred\n");
-		return 0;
+	if (list_txt_files(directory_name, &files, &nfiles) != 0) {
+		fprintf(stderr, "Error creating .txt file names array.\n");
+		return -1;
 	}
 
-	// create sorted list of text files
-	while ((dir = readdir(d)) != NULL) {
-		int len = strlen(dir->d_name);
-		if(len >= 4 && dir->d_name[len-4] == '.' && dir->d_name[len-3] == 't' && dir->d_name[len-2] == 'x' && dir->d_name[len-1] == 't') {
-			files = realloc(files, (nfiles+1)*sizeof(char *));
-			assert(files != NULL);
-
-			files[nfiles] = strdup(dir->d_name);
-			assert(files[nfiles] != NULL);
-
-			nfiles++;
-		}
-	}
-	closedir(d);
-	qsort(files, nfiles, sizeof(char *), cmp);
 
 	FILE *f_out = fopen("text.tzip", "wb");
 	assert(f_out != NULL);
