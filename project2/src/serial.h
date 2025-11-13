@@ -1,3 +1,14 @@
+// Group 31 Operating Systems Project 2
+
+// Tevin Gajadhar #U89310811
+// Ethan Varn U41240412
+// Danish Abdullah U25632651
+// Jack Rodriguez U69523108
+
+// Multithreaded text compressor for Project 2.
+// Uses pthreads and zlib so multiple worker threads can compress .txt files in parallel and write a single ordered output file.
+
+
 #ifndef __SERIAL_H__
 #define __SERIAL_H__
 
