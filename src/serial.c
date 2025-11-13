@@ -1,4 +1,13 @@
+// Group 31 Operating Systems Project 2
+
 // Tevin Gajadhar #U89310811
+// Ethan Varn U41240412
+// Danish Abdullah U25632651
+// Jack Rodriguez U69523108
+
+// Multithreaded text compressor for Project 2.
+// Uses pthreads and zlib so multiple worker threads can compress .txt files in parallel and write a single ordered output file.
+
 
 #define SERIAL_IMPLEMENTATION
 
@@ -9,6 +18,7 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <zlib.h>
 
 #define BUFFER_SIZE 1048576 // 1MB
@@ -216,8 +226,8 @@ void *compression_worker(void *arg) {
         }
 
 		// Close input, if abort_file is set continue to next file
-		fclose(fin);
-		if (abort_file) continue; 
+        fclose(fin);
+        if (abort_file) { fclose(ftmp); continue; } 
 		
 
 		// Grab the write lock to write 
@@ -229,6 +239,15 @@ void *compression_worker(void *arg) {
 
 		// rewind temp file and write its contents to the output file
 		rewind(ftmp);
+
+        // write little-endian compressed length header
+        uint32_t payload_len = (uint32_t)out_bytes;
+        unsigned char len_buf[4];
+        len_buf[0] = (unsigned char)(payload_len & 0xFF);
+        len_buf[1] = (unsigned char)((payload_len >> 8) & 0xFF);
+        len_buf[2] = (unsigned char)((payload_len >> 16) & 0xFF);
+        len_buf[3] = (unsigned char)((payload_len >> 24) & 0xFF);
+        fwrite(len_buf, 1, sizeof(len_buf), ctx->f_out);
 
 		// write temp file contents to output file
 		for (;;) {
